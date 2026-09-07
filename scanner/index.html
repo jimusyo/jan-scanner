@@ -143,19 +143,52 @@ window.onload = function () {
  *************************************************************/
 function startScanning() {
   if (qrScanner) return;
+
   qrScanner = new Html5Qrcode('reader');
   var config = { fps: 10, qrbox: { width: 260, height: 160 } };
 
-  qrScanner.start(
-    { facingMode: 'environment' },
-    config,
-    onDecoded,
-    onDecodeFailure
-  ).catch(function (err) {
-    showScanMsg('カメラを起動できませんでした。カメラの使用を許可しているかご確認のうえ、画面を再読み込みしてください。', 'error');
-  });
-}
+  function begin(cameraSetting) {
+    return qrScanner.start(
+      cameraSetting,
+      config,
+      onDecoded,
+      onDecodeFailure
+    );
+  }
 
+  // まず背面カメラを使用する
+  begin({ facingMode: { exact: 'environment' } })
+
+    // 背面カメラ指定で失敗した場合、端末で使えるカメラを探して再試行する
+    .catch(function () {
+      return Html5Qrcode.getCameras().then(function (cameras) {
+        if (!cameras || cameras.length === 0) {
+          throw new Error('利用できるカメラが見つかりません。');
+        }
+
+        var rearCamera = cameras.find(function (camera) {
+          return /back|rear|environment|背面|後面/i.test(camera.label);
+        });
+
+        var selectedCamera = rearCamera || cameras[cameras.length - 1];
+        return begin({ deviceId: { exact: selectedCamera.id } });
+      });
+    })
+
+    // それでも失敗した場合は、実際の理由を画面に表示する
+    .catch(function (err) {
+      qrScanner = null;
+
+      var detail = (err && (err.name || err.message))
+        ? (err.name || err.message)
+        : String(err || '');
+
+      showScanMsg(
+        'カメラを起動できませんでした。理由：' + detail,
+        'error'
+      );
+    });
+}
 function stopScanning() {
   if (qrScanner) {
     qrScanner.stop().then(function () {
