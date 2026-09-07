@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JANスキャン</title>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#2c6e49">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root {
+    --main-color: #2c6e49;
+    --accent-color: #4c956c;
+    --bg-color: #f7f9f7;
+    --border-color: #d8e2dc;
+    --danger-color: #c1121f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+    background: var(--bg-color); color: #222;
+  }
+  header {
+    background: var(--main-color); color: #fff; padding: 14px 16px;
+    text-align: center; font-size: 17px; font-weight: bold;
+  }
+  main { padding: 16px; max-width: 480px; margin: 0 auto; }
+  .card {
+    background: #fff; border: 1px solid var(--border-color); border-radius: 10px;
+    padding: 18px; margin-bottom: 16px;
+  }
+  #reader { width: 100%; border-radius: 8px; overflow: hidden; }
+  button {
+    width: 100%; padding: 16px; font-size: 17px; border-radius: 8px; border: none;
+    cursor: pointer; margin-top: 10px;
+  }
+  button.primary { background: var(--main-color); color: #fff; }
+  button.secondary { background: #fff; color: var(--main-color); border: 2px solid var(--main-color); }
+  button:disabled { background: #aaa; color: #fff; cursor: not-allowed; }
+  .msg { font-size: 15px; margin-top: 12px; padding: 12px; border-radius: 8px; line-height: 1.6; }
+  .msg.info { background: #eef4ee; color: #333; }
+  .msg.error { background: #ffd6d6; color: var(--danger-color); }
+  .msg.success { background: #d8f3dc; color: #2c6e49; }
+  .product-box { font-size: 16px; line-height: 1.8; }
+  .product-box .row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 4px 0; }
+  .product-box .row .label { color: #666; font-size: 13px; }
+  .product-box .row .value { font-weight: bold; }
+  .hidden { display: none !important; }
+  .manual-input { display: flex; gap: 8px; margin-top: 8px; }
+  .manual-input input {
+    flex: 1; padding: 12px; font-size: 16px; border: 1px solid var(--border-color); border-radius: 8px;
+  }
+  .manual-input button { width: auto; padding: 12px 16px; margin-top: 0; }
+  footer { text-align: center; font-size: 12px; color: #999; padding: 16px; }
+</style>
+</head>
+<body>
+
+<header>📷 JANスキャン</header>
+
+<main>
+
+  <!-- 設定が正しくない場合の案内 -->
+  <div id="setupErrorCard" class="card hidden">
+    <div class="msg error">
+      このページは、いつもの在庫管理システムの「JANスキャン」ボタンから開いてください。<br>
+      このページを直接開いた場合、どのシステムと連携すればよいかが分からないため、ご利用いただけません。
+    </div>
+  </div>
+
+  <!-- スキャン画面 -->
+  <div id="scanCard" class="card hidden">
+    <div id="reader"></div>
+    <div id="scanMsg" class="msg info">商品のバーコード（JANコード）をカメラにかざしてください。自動で読み取ります。</div>
+
+    <div class="manual-input">
+      <input type="text" id="manualJan" placeholder="読み取れない場合はここにJANコードを入力" inputmode="numeric">
+      <button class="secondary" onclick="lookupManualJan()">検索</button>
+    </div>
+  </div>
+
+  <!-- 検索中 -->
+  <div id="loadingCard" class="card hidden">
+    <div class="msg info">商品を確認しています…</div>
+  </div>
+
+  <!-- 商品が見つかった場合 -->
+  <div id="foundCard" class="card hidden">
+    <div class="msg success">商品が見つかりました。</div>
+    <div class="product-box">
+      <div class="row"><span class="label">商品番号</span><span class="value" id="found_productId"></span></div>
+      <div class="row"><span class="label">商品名</span><span class="value" id="found_name"></span></div>
+      <div class="row"><span class="label">品番</span><span class="value" id="found_partNo"></span></div>
+      <div class="row"><span class="label">規格</span><span class="value" id="found_spec"></span></div>
+      <div class="row"><span class="label">単位</span><span class="value" id="found_unit"></span></div>
+      <div class="row"><span class="label">保管場所</span><span class="value" id="found_location"></span></div>
+    </div>
+    <button class="primary" onclick="goBackToApp(true)">この商品でシステムへ戻る</button>
+    <button class="secondary" onclick="restartScan()">もう一度スキャンする</button>
+  </div>
+
+  <!-- 未登録の場合 -->
+  <div id="notFoundCard" class="card hidden">
+    <div class="msg error" id="notFoundMsg">JANコードが商品マスターに登録されていません。</div>
+    <button class="primary" onclick="restartScan()">もう一度スキャンする</button>
+    <button class="secondary" onclick="goBackToApp(false)">検索画面に戻る（手入力で探す）</button>
+  </div>
+
+</main>
+
+<footer>棚卸・在庫管理システム連携ページ</footer>
+
+<script>
+/*************************************************************
+ * URLパラメータの取得
+ *   api    … メインアプリ（Google Apps Script Webアプリ）のURL
+ *   target … 'in'（入庫）または 'out'（出庫）。メインアプリに戻るときに使う
+ *************************************************************/
+var params = new URLSearchParams(window.location.search);
+var API_URL = params.get('api') || '';
+var TARGET = params.get('target') || 'in';
+
+var qrScanner = null;
+var isProcessing = false; // 二重に検索が走らないようにするフラグ
+var lastFailMessageAt = 0; // 読み取り失敗メッセージを表示しすぎないための時刻記録
+
+window.onload = function () {
+  if (!API_URL) {
+    document.getElementById('setupErrorCard').classList.remove('hidden');
+    return;
+  }
+  document.getElementById('scanCard').classList.remove('hidden');
+  startScanning();
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./service-worker.js').catch(function () {});
+  }
+};
+
+/*************************************************************
+ * リアルタイムカメラでの読み取り
+ *************************************************************/
+function startScanning() {
+  if (qrScanner) return;
+  qrScanner = new Html5Qrcode('reader');
+  var config = { fps: 10, qrbox: { width: 260, height: 160 } };
+
+  qrScanner.start(
+    { facingMode: 'environment' },
+    config,
+    onDecoded,
+    onDecodeFailure
+  ).catch(function (err) {
+    showScanMsg('カメラを起動できませんでした。カメラの使用を許可しているかご確認のうえ、画面を再読み込みしてください。', 'error');
+  });
+}
+
+function stopScanning() {
+  if (qrScanner) {
+    qrScanner.stop().then(function () {
+      qrScanner.clear();
+      qrScanner = null;
+    }).catch(function () { qrScanner = null; });
+  }
+}
+
+function onDecoded(decodedText) {
+  if (isProcessing) return; // 読み取り直後に何度も反応しないようにする
+  isProcessing = true;
+  stopScanning();
+  lookupJan(decodedText);
+}
+
+// 読み取れなかったフレームのたびに呼ばれるため、頻繁に表示を切り替えないよう間引く
+function onDecodeFailure() {
+  var now = Date.now();
+  if (now - lastFailMessageAt > 4000) {
+    lastFailMessageAt = now;
+    showScanMsg('バーコードを画面中央に合わせてください。読み取れない場合は、もう少し明るい場所でお試しください。', 'info');
+  }
+}
+
+function showScanMsg(text, type) {
+  var box = document.getElementById('scanMsg');
+  if (!box) return;
+  box.textContent = text;
+  box.className = 'msg ' + type;
+}
+
+/*************************************************************
+ * 手入力での検索
+ *************************************************************/
+function lookupManualJan() {
+  var val = document.getElementById('manualJan').value.trim();
+  if (!val) return;
+  if (isProcessing) return;
+  isProcessing = true;
+  stopScanning();
+  lookupJan(val);
+}
+
+/*************************************************************
+ * メインアプリのAPIへ、JANコードだけを送って商品情報を問い合わせる
+ * （在庫数の取得や登録は、ここでは一切行わない）
+ *************************************************************/
+var lastScannedJan = '';
+
+function lookupJan(jan) {
+  lastScannedJan = jan;
+  document.getElementById('scanCard').classList.add('hidden');
+  document.getElementById('loadingCard').classList.remove('hidden');
+
+  var url = API_URL + (API_URL.indexOf('?') > -1 ? '&' : '?') +
+    'mode=lookup&jan=' + encodeURIComponent(jan);
+
+  fetch(url)
+    .then(function (res) {
+      if (!res.ok) throw new Error('通信エラー');
+      return res.json();
+    })
+    .then(function (data) {
+      document.getElementById('loadingCard').classList.add('hidden');
+      if (data && data.found) {
+        showFound(data.product);
+      } else {
+        showNotFound((data && data.message) || 'JANコードが商品マスターに登録されていません。');
+      }
+    })
+    .catch(function () {
+      document.getElementById('loadingCard').classList.add('hidden');
+      showNotFound('通信できませんでした。電波の良い場所でもう一度お試しください。');
+    });
+}
+
+function showFound(product) {
+  document.getElementById('found_productId').textContent = product.productId || '';
+  document.getElementById('found_name').textContent = product.name || '';
+  document.getElementById('found_partNo').textContent = product.partNo || '-';
+  document.getElementById('found_spec').textContent = product.spec || '-';
+  document.getElementById('found_unit').textContent = product.unit || '-';
+  document.getElementById('found_location').textContent = product.location || '-';
+  document.getElementById('foundCard').classList.remove('hidden');
+}
+
+function showNotFound(message) {
+  document.getElementById('notFoundMsg').textContent = message;
+  document.getElementById('notFoundCard').classList.remove('hidden');
+}
+
+/*************************************************************
+ * メインアプリへ戻る
+ *   withJan = true  … 見つかった商品番号(JAN)を持って戻り、メインアプリ側で自動検索させる
+ *   withJan = false … 何も渡さず、メインアプリの手入力検索画面に戻るだけ
+ *************************************************************/
+function goBackToApp(withJan) {
+  var url = API_URL;
+  if (withJan) {
+    url += (url.indexOf('?') > -1 ? '&' : '?') +
+      'jan=' + encodeURIComponent(lastScannedJan) + '&target=' + encodeURIComponent(TARGET);
+  }
+  window.location.href = url;
+}
+
+function restartScan() {
+  isProcessing = false;
+  document.getElementById('foundCard').classList.add('hidden');
+  document.getElementById('notFoundCard').classList.add('hidden');
+  document.getElementById('loadingCard').classList.add('hidden');
+  document.getElementById('manualJan').value = '';
+  document.getElementById('scanCard').classList.remove('hidden');
+  showScanMsg('商品のバーコード（JANコード）をカメラにかざしてください。自動で読み取ります。', 'info');
+  startScanning();
+}
+</script>
+</body>
+</html>
