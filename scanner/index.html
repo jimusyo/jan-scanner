@@ -74,6 +74,12 @@
     <div id="reader"></div>
     <div id="scanMsg" class="msg info">商品のバーコード（JANコード）をカメラにかざしてください。自動で読み取ります。</div>
 
+    <!-- 【今回追加】複数カメラがある端末向けの手動切り替え（通常は非表示） -->
+    <div id="cameraSwitcherBox" class="hidden" style="margin-top:10px;">
+      <label style="font-size:13px; color:#666; display:block; margin-bottom:4px;">カメラが違う場合はこちらで切り替え</label>
+      <select id="cameraSwitcherSelect" onchange="switchCamera()" style="width:100%; padding:10px; font-size:14px; border:1px solid var(--border-color); border-radius:8px;"></select>
+    </div>
+
     <div class="manual-input">
       <input type="text" id="manualJan" placeholder="読み取れない場合はここにJANコードを入力" inputmode="numeric">
       <button class="secondary" onclick="lookupManualJan()">検索</button>
@@ -140,55 +146,114 @@ window.onload = function () {
 
 /*************************************************************
  * リアルタイムカメラでの読み取り
+ *
+ * 【今回の修正】
+ * これまでは常に { facingMode: 'environment' } という指定だけでカメラを起動していたが、
+ * 端末によっては、この指定だけではブラウザがどのカメラを使えばよいか判断できず、
+ * 起動に失敗することがある（特に業務用端末など、カメラの情報が特殊な機種で起きやすい）。
+ *
+ * そのため、まず「利用できるカメラの一覧」を取得し、そのラベル（名前）から
+ * こちらで背面カメラらしきものを判定して指定する方式に変更した。
+ * それでも失敗する場合は、従来通りfacingMode指定でもう一度だけ試す。
  *************************************************************/
+var availableCameras = [];
+
 function startScanning() {
   if (qrScanner) return;
-
   qrScanner = new Html5Qrcode('reader');
   var config = { fps: 10, qrbox: { width: 260, height: 160 } };
 
-  function begin(cameraSetting) {
-    return qrScanner.start(
-      cameraSetting,
-      config,
-      onDecoded,
-      onDecodeFailure
-    );
-  }
-
-  // まず背面カメラを使用する
-  begin({ facingMode: { exact: 'environment' } })
-
-    // 背面カメラ指定で失敗した場合、端末で使えるカメラを探して再試行する
-    .catch(function () {
-      return Html5Qrcode.getCameras().then(function (cameras) {
-        if (!cameras || cameras.length === 0) {
-          throw new Error('利用できるカメラが見つかりません。');
-        }
-
-        var rearCamera = cameras.find(function (camera) {
-          return /back|rear|environment|背面|後面/i.test(camera.label);
-        });
-
-        var selectedCamera = rearCamera || cameras[cameras.length - 1];
-        return begin({ deviceId: { exact: selectedCamera.id } });
-      });
-    })
-
-    // それでも失敗した場合は、実際の理由を画面に表示する
-    .catch(function (err) {
-      qrScanner = null;
-
-      var detail = (err && (err.name || err.message))
-        ? (err.name || err.message)
-        : String(err || '');
-
-      showScanMsg(
-        'カメラを起動できませんでした。理由：' + detail,
-        'error'
-      );
-    });
+  Html5Qrcode.getCameras().then(function (devices) {
+    availableCameras = devices || [];
+    if (availableCameras.length === 0) {
+      showScanMsg('この端末でカメラが見つかりませんでした。カメラが正しく認識されているかご確認ください。', 'error');
+      return;
+    }
+    renderCameraSwitcher();
+    var cameraId = pickBackCameraId(availableCameras);
+    startWithCameraId(cameraId, config);
+  }).catch(function (err) {
+    // 端末によってはカメラ一覧の取得自体に失敗することがあるため、
+    // その場合は昔ながらのfacingMode指定で起動を試みる。
+    startWithFacingMode(config, err);
+  });
 }
+
+// カメラのラベル（名前）に "back"「rear」「背面」などが含まれるものを背面カメラとみなす。
+// 見つからない場合は、多くの端末で背面カメラが後ろに列挙される傾向があるため、一覧の最後を使う。
+function pickBackCameraId(devices) {
+  var back = devices.find(function (d) {
+    var label = (d.label || '').toLowerCase();
+    return label.indexOf('back') !== -1 || label.indexOf('rear') !== -1 ||
+           label.indexOf('environment') !== -1 || label.indexOf('背面') !== -1;
+  });
+  return back ? back.id : devices[devices.length - 1].id;
+}
+
+function startWithCameraId(cameraId, config) {
+  qrScanner.start(cameraId, config, onDecoded, onDecodeFailure).catch(function (err) {
+    // 指定したカメラIDでの起動に失敗した場合、facingMode指定でもう一度だけ試す
+    startWithFacingMode(config, err);
+  });
+}
+
+function startWithFacingMode(config, firstErr) {
+  qrScanner.start({ facingMode: 'environment' }, config, onDecoded, onDecodeFailure).catch(function (err) {
+    showCameraStartError(err || firstErr);
+  });
+}
+
+// カメラ起動に失敗した理由に応じて、できるだけ具体的な案内を表示する
+// （テスト環境向けに、原因調査用の詳細メッセージも末尾に表示する）
+function showCameraStartError(err) {
+  var name = err && err.name ? err.name : '';
+  var detail = err && err.message ? err.message : String(err);
+  var guidance;
+  if (name === 'NotAllowedError') {
+    guidance = 'カメラの使用が許可されていません。ブラウザのサイト設定でカメラを「許可」にしてから、画面を再読み込みしてください。';
+  } else if (name === 'NotReadableError') {
+    guidance = '他のアプリがカメラを使用中の可能性があります。カメラを使う他のアプリ（カメラアプリ・ビデオ通話アプリなど）を閉じてから、もう一度お試しください。';
+  } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+    guidance = 'この端末で使えるカメラが見つかりませんでした。';
+  } else if (name === 'SecurityError') {
+    guidance = 'セキュリティ設定によりカメラを起動できませんでした（httpsでアクセスしているかご確認ください）。';
+  } else {
+    guidance = 'カメラを起動できませんでした。カメラの使用を許可しているかご確認のうえ、画面を再読み込みしてください。';
+  }
+  showScanMsg(guidance + '（詳細: ' + (name || '不明') + ' / ' + detail + '）', 'error');
+}
+
+// 複数のカメラがある端末向けに、手動で切り替えられるプルダウンを表示する
+// （自動判定が外れて前面カメラが起動してしまった場合などの保険）
+function renderCameraSwitcher() {
+  var box = document.getElementById('cameraSwitcherBox');
+  if (!box) return;
+  if (availableCameras.length <= 1) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  var select = document.getElementById('cameraSwitcherSelect');
+  select.innerHTML = '';
+  availableCameras.forEach(function (d, i) {
+    var opt = document.createElement('option');
+    opt.value = d.id;
+    opt.textContent = d.label || ('カメラ' + (i + 1));
+    select.appendChild(opt);
+  });
+  select.value = pickBackCameraId(availableCameras);
+}
+
+function switchCamera() {
+  var select = document.getElementById('cameraSwitcherSelect');
+  var cameraId = select.value;
+  if (!qrScanner) return;
+  qrScanner.stop().then(function () {
+    var config = { fps: 10, qrbox: { width: 260, height: 160 } };
+    startWithCameraId(cameraId, config);
+  }).catch(function () {
+    var config = { fps: 10, qrbox: { width: 260, height: 160 } };
+    startWithCameraId(cameraId, config);
+  });
+}
+
 function stopScanning() {
   if (qrScanner) {
     qrScanner.stop().then(function () {
