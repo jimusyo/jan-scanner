@@ -49,7 +49,14 @@
 
   <script>
     var params = new URLSearchParams(window.location.search);
-    var API_URL = params.get('api') || '';
+    // 【第6段階(P6)】連携先は「GoogleのApps Script（…/exec）」のURLだけを受け付ける。
+    // それ以外のURLが指定された場合は使わない（読み取ったコードを知らないサイトへ送らないため）。
+    var API_URL_PATTERN = /^https:\/\/script\.google\.com\/(macros|a\/macros\/[A-Za-z0-9.-]+)\/s\/[A-Za-z0-9_-]+\/(exec|dev)$/;
+    var rawApi = params.get('api') || '';
+    var API_URL = API_URL_PATTERN.test(rawApi) ? rawApi : '';
+    // 読み取ってよいコード：JAN/EAN/UPC（数字8〜14桁）。手入力は英数字とハイフン（最大32文字）。
+    var SCAN_CODE_PATTERN = /^\d{8,14}$/;
+    var MANUAL_CODE_PATTERN = /^[0-9A-Za-z-]{1,32}$/;
     var TARGET = params.get('target') === 'out' ? 'out' : 'in';
     var qrScanner = null;
     var availableCameras = [];
@@ -70,7 +77,9 @@
 
     function startScanning() {
       if (qrScanner) return;
-      qrScanner = new Html5Qrcode('reader');
+      // 【第6段階(P6)】QRコードなどは読まず、商品バーコード（JAN/EAN/UPC）だけを読む
+      var F = Html5QrcodeSupportedFormats;
+      qrScanner = new Html5Qrcode('reader', { formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF], verbose: false });
       var config = { fps: 10, qrbox: { width: 260, height: 160 } };
       Html5Qrcode.getCameras().then(function (devices) {
         availableCameras = devices || [];
@@ -141,6 +150,11 @@
 
     function onDecoded(jan) {
       if (isProcessing) return;
+      jan = String(jan || '').trim();
+      if (!SCAN_CODE_PATTERN.test(jan)) { // 商品バーコード以外は無視して読み取りを続ける
+        showScanMsg('商品のバーコード（JANコード）ではないため読み取りませんでした。', 'error');
+        return;
+      }
       isProcessing = true;
       stopScanning();
       returnToApp(jan);
@@ -157,6 +171,10 @@
     function lookupManualJan() {
       var jan = document.getElementById('manualJan').value.trim();
       if (!jan || isProcessing) return;
+      if (!MANUAL_CODE_PATTERN.test(jan)) {
+        showScanMsg('半角の数字・英字・ハイフンで入力してください（32文字まで）。', 'error');
+        return;
+      }
       isProcessing = true;
       stopScanning();
       returnToApp(jan);
